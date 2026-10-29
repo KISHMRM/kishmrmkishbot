@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import requests
 from playwright.async_api import async_playwright
 
@@ -12,12 +13,16 @@ def send_to_telegram(text):
         print("Error: Telegram credentials are not set in Secrets.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
+    payload = {"chat_id": CHAT_ID, "text": text} # parse_mode حذف شد تا مشکل فیلتر نداشته باشیم
     response = requests.post(url, json=payload)
     if response.status_code == 200:
         print("Message sent to Telegram successfully!")
     else:
         print("Failed to send message:", response.text)
+
+def clean_text(text):
+    # حذف فاصله های اضافی و خطوط جدید
+    return re.sub(r'\s+', ' ', text).strip()
 
 async def main():
     print("Starting Playwright...")
@@ -55,30 +60,41 @@ async def main():
                     if len(cols) < 6:
                         continue
                     
-                    # استخراج متن هر ستون
-                    fund_name = (await cols[0].inner_text()).strip()
-                    symbol = (await cols[1].inner_text()).strip()
+                    fund_name = clean_text(await cols[0].inner_text())
+                    symbol = clean_text(await cols[1].inner_text())
                     
-                    # در ستون ارزش، کلمه خرید/فروش و مبلغ با هم هستند. 
-                    # ما کلمه خرید/فروش رو از مبلغ جدا میکنیم
-                    value_col_text = (await cols[2].inner_text()).replace('\n', ' ').strip()
+                    # ستون ارزش (شامل کلمه خرید/فروش)
+                    value_col_text = clean_text(await cols[2].inner_text())
                     
-                    asset_value = (await cols[3].inner_text()).replace('\n', ' ').strip()
-                    weight_in_portfolio = (await cols[4].inner_text()).replace('\n', ' ').strip()
-                    weight_30d = (await cols[5].inner_text()).replace('\n', ' ').strip()
+                    # ستون دارایی (معمولا دو عدد با فاصله داره)
+                    asset_raw = clean_text(await cols[3].inner_text())
+                    
+                    # ستون وزن سبد (دو عدد با فاصله)
+                    weight_raw = clean_text(await cols[4].inner_text())
+                    
+                    # ستون وزن ۳۰ روزه
+                    weight_30d_raw = clean_text(await cols[5].inner_text())
 
-                    # حذف فاصله‌های اضافی و خطوط جدید
-                    import re
-                    asset_value = re.sub(r'\s+', ' ', asset_value)
-                    weight_in_portfolio = re.sub(r'\s+', ' ', weight_in_portfolio)
-                    weight_30d = re.sub(r'\s+', ' ', weight_30d)
+                    # جدا کردن اعداد دارایی
+                    asset_parts = asset_raw.split()
+                    if len(asset_parts) >= 2:
+                        asset_text = f"قبل: {asset_parts[0]} | بعد: {asset_parts[1]}"
+                    else:
+                        asset_text = asset_raw
 
-                    # ساخت متن پیام
+                    # جدا کردن اعداد وزن سبد
+                    weight_parts = weight_raw.split()
+                    if len(weight_parts) >= 2:
+                        weight_text = f"قبل: {weight_parts[0]} | بعد: {weight_parts[1]}"
+                    else:
+                        weight_text = weight_raw
+
                     formatted_record = (
-                        f"🏢 <b>{fund_name}</b> | نماد: {symbol}\n"
+                        f"🏢 {fund_name} | نماد: {symbol}\n"
                         f"💰 ارزش: {value_col_text}\n"
-                        f"📊 دارایی: {asset_value} میلیارد تومان\n"
-                        f"⚖️ وزن سبد: {weight_in_portfolio} | وزن ۳۰ روزه: {weight_30d}"
+                        f"📊 دارایی: {asset_text} (میلیارد تومان)\n"
+                        f"⚖️ وزن سبد: {weight_text}\n"
+                        f"📅 وزن ۳۰ روزه: {weight_30d_raw}"
                     )
 
                     if "خرید" in value_col_text:
@@ -88,16 +104,13 @@ async def main():
 
                 # ارسال به تلگرام
                 if buys:
-                    buy_msg = "<b>🟢 خریدهای صندوق‌ها</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(buys)
+                    buy_msg = "🟢 خریدهای صندوق‌ها\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(buys)
                     send_to_telegram(buy_msg)
                     await asyncio.sleep(2)
                 
                 if sells:
-                    sell_msg = "<b>🔴 فروش‌های صندوق‌ها</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(sells)
+                    sell_msg = "🔴 فروش‌های صندوق‌ها\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(sells)
                     send_to_telegram(sell_msg)
-
-                if not buys and not sells:
-                    print("No data could be extracted from the table.")
 
             else:
                 print("Could not find the target section on the page.")
