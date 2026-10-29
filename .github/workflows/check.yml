@@ -1,7 +1,7 @@
 name: Fundbase Bot
 
 on:
-  workflow_dispatch: # برای اینکه بتونی دستی اجراش کنی
+  workflow_dispatch: # برای اجرای دستی
   schedule:
     - cron: '0 * * * *' # اجرای خودکار هر ۱ ساعت
 
