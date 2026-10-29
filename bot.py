@@ -28,98 +28,86 @@ async def main():
         
         print(f"Going to {URL}")
         await page.goto(URL, wait_until="networkidle", timeout=60000)
-        
-        try:
-            await page.wait_for_selector("table", timeout=15000)
-            print("Table found!")
-        except Exception:
-            print("Table not found.")
-            await browser.close()
-            return
-
-        text = await page.evaluate("document.body.innerText")
-        await browser.close()
+        await page.wait_for_timeout(3000) # صبر برای لود کامل کارت ها
 
         try:
-            # ۱. پیدا کردن آخرین تاریخ
+            # ۱. پیدا کردن تاریخ آخرین روز
+            page_text = await page.evaluate("document.body.innerText")
             last_day_marker = "آخرین روز\n"
-            last_day_index = text.find(last_day_marker)
+            last_day_index = page_text.find(last_day_marker)
             if last_day_index == -1:
                 print("Could not find the last trading day.")
+                await browser.close()
                 return
-            last_date = text[last_day_index + len(last_day_marker):].split('\n')[0].strip()
+            last_date = page_text[last_day_index + len(last_day_marker):].split('\n')[0].strip()
             print(f"Last trading date: {last_date}")
 
-            # ۲. پیدا کردن بخش لیست انتقالات
-            start_marker = "تازه‌ترین نقل و انتقالات"
-            end_marker = "منبع: گزارش روزانه"
+            # ۲. پیدا کردن تمام کارت های نقل و انتقالات
+            # ما کارت هایی رو پیدا میکنیم که توشون کلمه "مالکیت" یا "سهم" هست
+            cards = await page.locator("div:has-text('مالکیت')").all()
             
-            start_index = text.find(start_marker)
-            end_index = text.find(end_marker)
-            
-            if start_index != -1 and end_index != -1:
-                transfers_text = text[start_index:end_index].strip()
-                lines = transfers_text.split('\n')
-                clean_lines = [line.strip() for line in lines if line.strip() not in ["تازه‌ترین نقل و انتقالات", "همه", "خرید", "فروش"]]
-                
-                # جدا کردن بلوک‌های داده
-                blocks = []
-                current_block = []
-                
-                for line in clean_lines:
-                    if last_date in line:
-                        current_block.append(line)
-                    elif current_block:
-                        current_block.append(line)
-                        if len(current_block) >= 4: # هر بلوک تقریبا ۴ خطه
-                            blocks.append(current_block)
-                            current_block = []
-                
-                if current_block:
-                    blocks.append(current_block)
+            buys = []
+            sells = []
 
-                # ۳. پردازش بلوک‌ها و تشخیص خرید و فروش
-                buys = []
-                sells = []
-
-                for block in blocks:
-                    block_text = " | ".join(block)
+            for card in cards:
+                # فقط کارت هایی رو در نظر میگیریم که تاریخ آخرین روز توشون باشه
+                card_text = await card.inner_text()
+                if last_date not in card_text:
+                    continue
                     
-                    # استخراج نام و نماد (اگر در انتهای بلوک باشه)
-                    name_match = re.search(r'\|\s*(\d+)\s+(\S+)\s+(\d{4}/\d{2}/\d{2})\s*\|\s*(\d+)\s*\|\s*([^|]+)\s*\|', block_text)
-                    player_name = ""
-                    symbol_name = ""
-                    if name_match:
-                         symbol_name = name_match.group(2).strip()
-                         player_name = name_match.group(5).strip()
-
-                    # تشخیص خرید (افزایش) یا فروش (کاهش)
-                    # اگر علامت + توی بلوک بود، خریده. اگر − بود، فروشه.
-                    if any("+" in line or "‎+" in line for line in block):
-                        # فرمت‌دهی خروجی برای خرید
-                        formatted = f"🟢 <b>{player_name if player_name else 'خرید'}</b> | نماد: {symbol_name}\n{block[0]}"
-                        buys.append(formatted)
-                    elif any("−" in line or "-" in line for line in block):
-                        formatted = f"🔴 <b>{player_name if player_name else 'فروش'}</b> | نماد: {symbol_name}\n{block[0]}"
-                        sells.append(formatted)
-
-                # ۴. ساخت پیام‌ها و ارسال
-                if buys:
-                    buy_msg = f"<b>🟢 خریدهای امروز ({last_date})</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(buys)
-                    send_to_telegram(buy_msg)
-                    await asyncio.sleep(2) # کمی صبر بین دو پیام
-
-                if sells:
-                    sell_msg = f"<b>🔴 فروش‌های امروز ({last_date})</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(sells)
-                    send_to_telegram(sell_msg)
+                # استخراج خطوط کارت
+                lines = [line.strip() for line in card_text.split('\n') if line.strip()]
                 
-                if not buys and not sells:
-                    print("No valid transfers found.")
+                # پیدا کردن اسم بازیکن (معمولا خط اول یا دوم است)
+                player_name = next((l for l in lines if len(l) < 20 and not any(char.isdigit() for char in l) and "خرید" not in l and "فروش" not in l), "نامشخص")
+                
+                # پیدا کردن نماد (کلمه ای که معمولا بعد از "افزایش" یا "کاهش" میاد)
+                symbol_name = "نامشخص"
+                for i, line in enumerate(lines):
+                    if "افزایش" in line or "کاهش" in line:
+                        if i + 1 < len(lines):
+                            symbol_name = lines[i+1]
+                        break
+                
+                # پیدا کردن مقدار سهم
+                share_amount = next((l for l in lines if "سهم" in l), "")
+                
+                # پیدا کردن درصد مالکیت
+                ownership = next((l for l in lines if "مالکیت" in l), "")
+                
+                # پیدا کردن ارزش ریالی
+                value = next((l for l in lines if "میلیارد تومان" in l or "میلیون تومان" in l or "هزار تومان" in l), "")
+
+                # تشخیص خرید یا فروش
+                if "افزایش" in card_text or "+" in card_text:
+                    formatted = f"🟢 <b>{player_name}</b> | نماد: {symbol_name}\n💰 {value}\n📊 {share_amount} | {ownership}"
+                    buys.append(formatted)
+                elif "کاهش" in card_text or "−" in card_text or "-" in card_text:
+                    formatted = f"🔴 <b>{player_name}</b> | نماد: {symbol_name}\n💰 {value}\n📊 {share_amount} | {ownership}"
+                    sells.append(formatted)
+
+            # حذف تکراری ها
+            buys = list(dict.fromkeys(buys))
+            sells = list(dict.fromkeys(sells))
+
+            # ۳. ارسال به تلگرام
+            if buys:
+                buy_msg = f"<b>🟢 خریدهای امروز ({last_date})</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(buys)
+                send_to_telegram(buy_msg)
+                await asyncio.sleep(2)
             else:
-                print("Could not find the specific markers in the page text.")
-                
+                print("No buys found.")
+
+            if sells:
+                sell_msg = f"<b>🔴 فروش‌های امروز ({last_date})</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(sells)
+                send_to_telegram(sell_msg)
+            else:
+                print("No sells found.")
+
         except Exception as e:
-            print("Error parsing text:", e)
+            print("Error:", e)
+        finally:
+            await browser.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
