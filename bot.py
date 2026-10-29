@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 import requests
 from playwright.async_api import async_playwright
 
@@ -28,10 +27,9 @@ async def main():
         
         print(f"Going to {URL}")
         await page.goto(URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(3000) # صبر برای لود کامل کارت ها
+        await page.wait_for_timeout(3000) 
 
         try:
-            # ۱. پیدا کردن تاریخ آخرین روز
             page_text = await page.evaluate("document.body.innerText")
             last_day_marker = "آخرین روز\n"
             last_day_index = page_text.find(last_day_marker)
@@ -42,26 +40,35 @@ async def main():
             last_date = page_text[last_day_index + len(last_day_marker):].split('\n')[0].strip()
             print(f"Last trading date: {last_date}")
 
-            # ۲. پیدا کردن تمام کارت های نقل و انتقالات
-            # ما کارت هایی رو پیدا میکنیم که توشون کلمه "مالکیت" یا "سهم" هست
-            cards = await page.locator("div:has-text('مالکیت')").all()
+            # ۱. پیدا کردن دقیق کارت های لیست پایین صفحه
+            # سایت فاندبیس معمولا هر کارت رو داخل یه تگ با کلاس خاص میذاره. 
+            # ما اینجا تمام دیو هایی رو میگیریم که کلاسشون شامل کلمه 'rounded' یا 'border' هست
+            cards = await page.locator("div.rounded-xl:has-text('مالکیت'), div[class*='card']:has-text('مالکیت')").all()
             
+            # اگر پیدا نکرد، از یه روش دیگه استفاده میکنیم که دقیق تر باشه
+            if not cards:
+                # پیدا کردن بلوک های اصلی که شامل یک تاریخ معتبر و کلمه مالکیت هستن
+                cards = await page.locator("div:has-text('مالکیت'):not(:has(div:has-text('مالکیت')))").all()
+
             buys = []
             sells = []
+            seen_names = set() # برای جلوگیری از تکرار
 
             for card in cards:
-                # فقط کارت هایی رو در نظر میگیریم که تاریخ آخرین روز توشون باشه
                 card_text = await card.inner_text()
                 if last_date not in card_text:
                     continue
                     
-                # استخراج خطوط کارت
                 lines = [line.strip() for line in card_text.split('\n') if line.strip()]
                 
-                # پیدا کردن اسم بازیکن (معمولا خط اول یا دوم است)
-                player_name = next((l for l in lines if len(l) < 20 and not any(char.isdigit() for char in l) and "خرید" not in l and "فروش" not in l), "نامشخص")
+                # پیدا کردن نام بازیکن (خطی که معمولا اولین خطه و عدد نداره)
+                player_name = "نامشخص"
+                for line in lines:
+                    if not any(char.isdigit() for char in line) and "خرید" not in line and "فروش" not in line and "مالکیت" not in line:
+                        player_name = line
+                        break
                 
-                # پیدا کردن نماد (کلمه ای که معمولا بعد از "افزایش" یا "کاهش" میاد)
+                # پیدا کردن نماد (کلمه ای که دقیقا بعد از "افزایش" یا "کاهش" میاد)
                 symbol_name = "نامشخص"
                 for i, line in enumerate(lines):
                     if "افزایش" in line or "کاهش" in line:
@@ -78,17 +85,19 @@ async def main():
                 # پیدا کردن ارزش ریالی
                 value = next((l for l in lines if "میلیارد تومان" in l or "میلیون تومان" in l or "هزار تومان" in l), "")
 
-                # تشخیص خرید یا فروش
+                # اگر اسم پیدا نشد یا تکراری بود، نادیده بگیر
+                if player_name == "نامشخص":
+                    continue
+                if player_name in seen_names:
+                    continue
+                seen_names.add(player_name)
+
                 if "افزایش" in card_text or "+" in card_text:
                     formatted = f"🟢 <b>{player_name}</b> | نماد: {symbol_name}\n💰 {value}\n📊 {share_amount} | {ownership}"
                     buys.append(formatted)
                 elif "کاهش" in card_text or "−" in card_text or "-" in card_text:
                     formatted = f"🔴 <b>{player_name}</b> | نماد: {symbol_name}\n💰 {value}\n📊 {share_amount} | {ownership}"
                     sells.append(formatted)
-
-            # حذف تکراری ها
-            buys = list(dict.fromkeys(buys))
-            sells = list(dict.fromkeys(sells))
 
             # ۳. ارسال به تلگرام
             if buys:
