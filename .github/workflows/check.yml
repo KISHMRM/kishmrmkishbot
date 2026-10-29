@@ -1,9 +1,12 @@
+
 name: Fundbase Bot
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */2 * * *' 
+    - cron: '30 19 * * *'  # ساعت ۲۳:۰۰ به وقت تهران
+    - cron: '30 0 * * *'   # ساعت ۰۴:۰۰ بامداد به وقت تهران
+
 
 jobs:
   run-bot:
