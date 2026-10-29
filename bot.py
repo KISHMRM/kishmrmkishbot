@@ -13,7 +13,7 @@ def send_to_telegram(text):
         print("Error: Telegram credentials are not set in Secrets.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text} # parse_mode حذف شد تا مشکل فیلتر نداشته باشیم
+    payload = {"chat_id": CHAT_ID, "text": text}
     response = requests.post(url, json=payload)
     if response.status_code == 200:
         print("Message sent to Telegram successfully!")
@@ -21,8 +21,17 @@ def send_to_telegram(text):
         print("Failed to send message:", response.text)
 
 def clean_text(text):
-    # حذف فاصله های اضافی و خطوط جدید
     return re.sub(r'\s+', ' ', text).strip()
+
+def parse_two_numbers(text):
+    """اگر متن شامل دو عدد بود، آن‌ها را با برچسب قبل و بعد جدا میکند"""
+    parts = text.split()
+    if len(parts) >= 2:
+        # اگر علامتهایی مثل — یا · وجود داشت، فقط اعداد معتبر را در نظر بگیر
+        valid_parts = [p for p in parts if any(char.isdigit() for char in p)]
+        if len(valid_parts) >= 2:
+            return f"قبل: {valid_parts[0]} | بعد: {valid_parts[1]}"
+    return text
 
 async def main():
     print("Starting Playwright...")
@@ -62,39 +71,23 @@ async def main():
                     
                     fund_name = clean_text(await cols[0].inner_text())
                     symbol = clean_text(await cols[1].inner_text())
-                    
-                    # ستون ارزش (شامل کلمه خرید/فروش)
                     value_col_text = clean_text(await cols[2].inner_text())
                     
-                    # ستون دارایی (معمولا دو عدد با فاصله داره)
                     asset_raw = clean_text(await cols[3].inner_text())
-                    
-                    # ستون وزن سبد (دو عدد با فاصله)
                     weight_raw = clean_text(await cols[4].inner_text())
-                    
-                    # ستون وزن ۳۰ روزه
                     weight_30d_raw = clean_text(await cols[5].inner_text())
 
-                    # جدا کردن اعداد دارایی
-                    asset_parts = asset_raw.split()
-                    if len(asset_parts) >= 2:
-                        asset_text = f"قبل: {asset_parts[0]} | بعد: {asset_parts[1]}"
-                    else:
-                        asset_text = asset_raw
-
-                    # جدا کردن اعداد وزن سبد
-                    weight_parts = weight_raw.split()
-                    if len(weight_parts) >= 2:
-                        weight_text = f"قبل: {weight_parts[0]} | بعد: {weight_parts[1]}"
-                    else:
-                        weight_text = weight_raw
+                    # پردازش اعداد با تابع جدید
+                    asset_text = parse_two_numbers(asset_raw)
+                    weight_text = parse_two_numbers(weight_raw)
+                    weight_30d_text = parse_two_numbers(weight_30d_raw)
 
                     formatted_record = (
                         f"🏢 {fund_name} | نماد: {symbol}\n"
                         f"💰 ارزش: {value_col_text}\n"
                         f"📊 دارایی: {asset_text} (میلیارد تومان)\n"
                         f"⚖️ وزن سبد: {weight_text}\n"
-                        f"📅 وزن ۳۰ روزه: {weight_30d_raw}"
+                        f"📅 وزن ۳۰ روزه: {weight_30d_text}"
                     )
 
                     if "خرید" in value_col_text:
