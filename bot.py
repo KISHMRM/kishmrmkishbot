@@ -36,50 +36,54 @@ async def main():
             if await target_card.count() > 0:
                 print("Found the card. Clicking...")
                 await target_card.click()
-                # صبر برای باز شدن جدول
                 await page.wait_for_timeout(5000) 
                 
-                # پیدا کردن جدول اصلی
                 table = page.locator("table").first
                 if await table.count() == 0:
                     print("Table not found!")
                     await browser.close()
                     return
 
-                # گرفتن تمام ردیف های جدول
                 rows = await table.locator("tr").all()
                 print(f"Found {len(rows)} rows in table.")
 
                 buys = []
                 sells = []
 
-                # از ردیف دوم شروع میکنیم چون ردیف اول هدر (تیتر) جدول است
                 for row in rows[1:]:
                     cols = await row.locator("td").all()
                     if len(cols) < 6:
-                        continue # اگر ردیف ستون کافی نداشت رد میشیم
+                        continue
                     
                     # استخراج متن هر ستون
                     fund_name = (await cols[0].inner_text()).strip()
                     symbol = (await cols[1].inner_text()).strip()
-                    value_text = (await cols[2].inner_text()).strip().replace('\n', ' ') # شامل کلمه خرید/فروش و مبلغ
-                    asset_value = (await cols[3].inner_text()).strip().replace('\n', ' ')
-                    weight_in_portfolio = (await cols[4].inner_text()).strip().replace('\n', ' ')
-                    weight_30d = (await cols[5].inner_text()).strip().replace('\n', ' ')
+                    
+                    # در ستون ارزش، کلمه خرید/فروش و مبلغ با هم هستند. 
+                    # ما کلمه خرید/فروش رو از مبلغ جدا میکنیم
+                    value_col_text = (await cols[2].inner_text()).replace('\n', ' ').strip()
+                    
+                    asset_value = (await cols[3].inner_text()).replace('\n', ' ').strip()
+                    weight_in_portfolio = (await cols[4].inner_text()).replace('\n', ' ').strip()
+                    weight_30d = (await cols[5].inner_text()).replace('\n', ' ').strip()
 
-                    # فرمت‌دهی به شکل خوانا
+                    # حذف فاصله‌های اضافی و خطوط جدید
+                    import re
+                    asset_value = re.sub(r'\s+', ' ', asset_value)
+                    weight_in_portfolio = re.sub(r'\s+', ' ', weight_in_portfolio)
+                    weight_30d = re.sub(r'\s+', ' ', weight_30d)
+
+                    # ساخت متن پیام
                     formatted_record = (
-                        f"🏢 <b>صندوق:</b> {fund_name}\n"
-                        f"📈 <b>نماد:</b> {symbol}\n"
-                        f"💰 <b>ارزش:</b> {value_text}\n"
-                        f"📊 <b>دارایی:</b> {asset_value}\n"
-                        f"⚖️ <b>وزن سبد:</b> {weight_in_portfolio} | <b>وزن ۳۰ روزه:</b> {weight_30d}"
+                        f"🏢 <b>{fund_name}</b> | نماد: {symbol}\n"
+                        f"💰 ارزش: {value_col_text}\n"
+                        f"📊 دارایی: {asset_value} میلیارد تومان\n"
+                        f"⚖️ وزن سبد: {weight_in_portfolio} | وزن ۳۰ روزه: {weight_30d}"
                     )
 
-                    # تفکیک خرید و فروش بر اساس وجود کلمه در ستون ارزش
-                    if "خرید" in value_text:
+                    if "خرید" in value_col_text:
                         buys.append(formatted_record)
-                    elif "فروش" in value_text:
+                    elif "فروش" in value_col_text:
                         sells.append(formatted_record)
 
                 # ارسال به تلگرام
