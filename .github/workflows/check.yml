@@ -1,9 +1,9 @@
 name: Fundbase Bot
 
 on:
-  workflow_dispatch: # برای اجرای دستی
+  workflow_dispatch:
   schedule:
-    - cron: '0 * * * *' # اجرای خودکار هر ۱ ساعت
+    - cron: '0 */2 * * *' 
 
 jobs:
   run-bot:
@@ -29,4 +29,7 @@ jobs:
         playwright install-deps
 
     - name: Run bot script
+      env:
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+        CHAT_ID: ${{ secrets.CHAT_ID }}
       run: python bot.py
