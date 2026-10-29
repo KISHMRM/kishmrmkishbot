@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import requests
 from playwright.async_api import async_playwright
 
@@ -57,53 +58,63 @@ async def main():
             end_index = text.find(end_marker)
             
             if start_index != -1 and end_index != -1:
-                # جدا کردن بخش انتقالات
                 transfers_text = text[start_index:end_index].strip()
-                
-                # ۳. پاکسازی متن اولیه
                 lines = transfers_text.split('\n')
-                # حذف خطوط اول که شامل تیتر و دکمه هاست
                 clean_lines = [line.strip() for line in lines if line.strip() not in ["تازه‌ترین نقل و انتقالات", "همه", "خرید", "فروش"]]
                 
-                # ۴. گروه‌بندی خطوط به صورت بلوک‌های متنی
-                # چون هر کارت شامل چند خط هست، ما خطوط رو بررسی میکنیم
-                # هر کارت معمولاً شامل نام و تاریخ هست که ما دنبال تاریخ میگردیم
-                records = []
-                current_record = []
+                # جدا کردن بلوک‌های داده
+                blocks = []
+                current_block = []
                 
                 for line in clean_lines:
-                    # اگر خط شامل تاریخ آخرین روز بود، یعنی یه رکورد جدید شروع شده
                     if last_date in line:
-                        current_record.append(line)
-                    elif current_record:
-                        current_record.append(line)
-                        # اگر به خطی رسیدیم که مربوط به رکورد بعدی نیست (مثل شروع کارت بعدی)
-                        # و رکورد فعلی کامل شده، اون رو ذخیره میکنیم
-                        # چون نمیدونیم دقیقا کجا تموم میشه، هر بار که یه تاریخ جدید دیدیم اون رو ذخیره میکنیم
-                        if len(current_record) >= 4: # تعداد خطوط تقریبی هر کارت
-                             records.append(" | ".join(current_record))
-                             current_record = []
+                        current_block.append(line)
+                    elif current_block:
+                        current_block.append(line)
+                        if len(current_block) >= 4: # هر بلوک تقریبا ۴ خطه
+                            blocks.append(current_block)
+                            current_block = []
+                
+                if current_block:
+                    blocks.append(current_block)
 
-                # اگر آخرین رکورد جا مونده بود
-                if current_record and len(current_record) > 0:
-                    records.append(" | ".join(current_record))
+                # ۳. پردازش بلوک‌ها و تشخیص خرید و فروش
+                buys = []
+                sells = []
 
-                # حذف رکوردهای تکراری
-                unique_records = list(dict.fromkeys(records))
-
-                if unique_records:
-                    formatted_list = "\n➖➖➖➖➖➖➖➖\n".join(unique_records)
-                    message = f"<b>📊 نقل و انتقالات فاندبیس ({last_date})</b>\n\n{formatted_list}"
+                for block in blocks:
+                    block_text = " | ".join(block)
                     
-                    max_length = 4000
-                    if len(message) > max_length:
-                        parts = [message[i:i+max_length] for i in range(0, len(message), max_length)]
-                        for part in parts:
-                            send_to_telegram(part)
-                    else:
-                        send_to_telegram(message)
-                else:
-                    print("No transfers found for the last date.")
+                    # استخراج نام و نماد (اگر در انتهای بلوک باشه)
+                    name_match = re.search(r'\|\s*(\d+)\s+(\S+)\s+(\d{4}/\d{2}/\d{2})\s*\|\s*(\d+)\s*\|\s*([^|]+)\s*\|', block_text)
+                    player_name = ""
+                    symbol_name = ""
+                    if name_match:
+                         symbol_name = name_match.group(2).strip()
+                         player_name = name_match.group(5).strip()
+
+                    # تشخیص خرید (افزایش) یا فروش (کاهش)
+                    # اگر علامت + توی بلوک بود، خریده. اگر − بود، فروشه.
+                    if any("+" in line or "‎+" in line for line in block):
+                        # فرمت‌دهی خروجی برای خرید
+                        formatted = f"🟢 <b>{player_name if player_name else 'خرید'}</b> | نماد: {symbol_name}\n{block[0]}"
+                        buys.append(formatted)
+                    elif any("−" in line or "-" in line for line in block):
+                        formatted = f"🔴 <b>{player_name if player_name else 'فروش'}</b> | نماد: {symbol_name}\n{block[0]}"
+                        sells.append(formatted)
+
+                # ۴. ساخت پیام‌ها و ارسال
+                if buys:
+                    buy_msg = f"<b>🟢 خریدهای امروز ({last_date})</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(buys)
+                    send_to_telegram(buy_msg)
+                    await asyncio.sleep(2) # کمی صبر بین دو پیام
+
+                if sells:
+                    sell_msg = f"<b>🔴 فروش‌های امروز ({last_date})</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(sells)
+                    send_to_telegram(sell_msg)
+                
+                if not buys and not sells:
+                    print("No valid transfers found.")
             else:
                 print("Could not find the specific markers in the page text.")
                 
