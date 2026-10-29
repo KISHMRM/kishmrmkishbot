@@ -1,6 +1,5 @@
 import asyncio
 import os
-import re
 import requests
 from playwright.async_api import async_playwright
 
@@ -27,42 +26,77 @@ async def main():
         page = await browser.new_page()
         
         print(f"Going to {URL}")
-        # رفتن به صفحه اصلی
         await page.goto(URL, wait_until="networkidle", timeout=60000)
-        
-        # صبر میکنیم تا صفحه اصلی کامل لود بشه
         await page.wait_for_timeout(3000)
 
         try:
             print("Looking for the funds trade section...")
-            # پیدا کردن متن روی کارت و کلیک روی اون
-            # از locator استفاده میکنیم تا مطمئن بشیم روی کارت درست کلیک میکنه
             target_card = page.locator("text=صندوق‌ها امروز چه سهم‌هایی خریدند و چه فروختند؟").first
             
             if await target_card.count() > 0:
                 print("Found the card. Clicking...")
                 await target_card.click()
-                
-                # صبر میکنیم تا پنجره (Modal) یا لیست باز بشه و دیتا لود بشه
+                # صبر برای باز شدن جدول
                 await page.wait_for_timeout(5000) 
-                print("Clicked and waited.")
+                
+                # پیدا کردن جدول اصلی
+                table = page.locator("table").first
+                if await table.count() == 0:
+                    print("Table not found!")
+                    await browser.close()
+                    return
+
+                # گرفتن تمام ردیف های جدول
+                rows = await table.locator("tr").all()
+                print(f"Found {len(rows)} rows in table.")
+
+                buys = []
+                sells = []
+
+                # از ردیف دوم شروع میکنیم چون ردیف اول هدر (تیتر) جدول است
+                for row in rows[1:]:
+                    cols = await row.locator("td").all()
+                    if len(cols) < 6:
+                        continue # اگر ردیف ستون کافی نداشت رد میشیم
+                    
+                    # استخراج متن هر ستون
+                    fund_name = (await cols[0].inner_text()).strip()
+                    symbol = (await cols[1].inner_text()).strip()
+                    value_text = (await cols[2].inner_text()).strip().replace('\n', ' ') # شامل کلمه خرید/فروش و مبلغ
+                    asset_value = (await cols[3].inner_text()).strip().replace('\n', ' ')
+                    weight_in_portfolio = (await cols[4].inner_text()).strip().replace('\n', ' ')
+                    weight_30d = (await cols[5].inner_text()).strip().replace('\n', ' ')
+
+                    # فرمت‌دهی به شکل خوانا
+                    formatted_record = (
+                        f"🏢 <b>صندوق:</b> {fund_name}\n"
+                        f"📈 <b>نماد:</b> {symbol}\n"
+                        f"💰 <b>ارزش:</b> {value_text}\n"
+                        f"📊 <b>دارایی:</b> {asset_value}\n"
+                        f"⚖️ <b>وزن سبد:</b> {weight_in_portfolio} | <b>وزن ۳۰ روزه:</b> {weight_30d}"
+                    )
+
+                    # تفکیک خرید و فروش بر اساس وجود کلمه در ستون ارزش
+                    if "خرید" in value_text:
+                        buys.append(formatted_record)
+                    elif "فروش" in value_text:
+                        sells.append(formatted_record)
+
+                # ارسال به تلگرام
+                if buys:
+                    buy_msg = "<b>🟢 خریدهای صندوق‌ها</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(buys)
+                    send_to_telegram(buy_msg)
+                    await asyncio.sleep(2)
+                
+                if sells:
+                    sell_msg = "<b>🔴 فروش‌های صندوق‌ها</b>\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(sells)
+                    send_to_telegram(sell_msg)
+
+                if not buys and not sells:
+                    print("No data could be extracted from the table.")
+
             else:
                 print("Could not find the target section on the page.")
-                await browser.close()
-                return
-
-            # حالا که کلیک کردیم، متن کل صفحه رو میخونیم (چون دیتا توی همون صفحه لود شده)
-            text = await page.evaluate("document.body.innerText")
-            await browser.close()
-
-            # اینجا یک بخش از متن رو چاپ میکنیم تا ببینیم ساختارش چطوره
-            print("Preview of loaded text after click:")
-            print(text[:2000])
-
-            # --- مرحله بعدی: تحلیل متن و ارسال ---
-            # فعلاً برای تست، فقط یک پیام میفرستیم که ببینیم دیتا اومده یا نه
-            message = f"<b>📊 تست باز شدن صندوق‌ها</b>\n\nبخش‌هایی از دیتای لود شده:\n\n{text[:1000]}"
-            send_to_telegram(message)
 
         except Exception as e:
             print("Error:", e)
