@@ -1,30 +1,37 @@
-
-import requests
-from bs4 import BeautifulSoup
+import asyncio
+from playwright.async_api import async_playwright
 
 URL = "https://app.fundbase.ir/transfers"
 
-def main():
-    print("Checking Fundbase transfers page...")
-
-    response = requests.get(
-        URL,
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=30,
-    )
-
-    print("HTTP status:", response.status_code)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    print("Page title:", soup.title.get_text(strip=True) if soup.title else "No title")
-    print("HTML length:", len(response.text))
-    print("Visible text preview:")
-    print(soup.get_text(" ", strip=True)[:2500])
-
-    if len(soup.get_text(strip=True)) < 100:
-        print("WARNING: Very little text found; JavaScript may be required.")
+async def main():
+    print("Starting Playwright...")
+    async with async_playwright() as p:
+        # اجرای مرورگر در حالت Headless (بدون نمایش پنجره)
+        browser = await p.chromium.launch(headless=True)
+        page = await browser.new_page()
+        
+        print(f"Going to {URL}")
+        # رفتن به صفحه و صبر کردن تا شبکه آرام بشه
+        await page.goto(URL, wait_until="networkidle", timeout=60000)
+        
+        # صبر میکنیم تا جدول لود بشه (این سلکتور ممکنه نیاز به تغییر داشته باشه)
+        # منتظر می‌مونیم تا تگ table در صفحه ظاهر بشه
+        try:
+            await page.wait_for_selector("table", timeout=15000)
+            print("Table found!")
+        except Exception:
+            print("Table not found. Page might not have loaded correctly.")
+        
+        # استخراج کل متن صفحه برای تست
+        content = await page.content()
+        print("HTML Length:", len(content))
+        
+        # گرفتن متن جدول (اگر جدول پیدا شد)
+        # این بخش رو بعدا دقیق‌تر می‌کنیم
+        text = await page.evaluate("document.body.innerText")
+        print("Page Text Preview:", text[:1000])
+        
+        await browser.close()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
