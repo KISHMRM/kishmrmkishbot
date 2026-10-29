@@ -27,57 +27,88 @@ async def main():
         
         print(f"Going to {URL}")
         await page.goto(URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(3000) # کمی صبر میکنیم تا کارت ها لود شن
         
         try:
+            await page.wait_for_selector("table", timeout=15000)
+            print("Table found!")
+        except Exception:
+            print("Table not found.")
+            await browser.close()
+            return
+
+        text = await page.evaluate("document.body.innerText")
+        await browser.close()
+
+        try:
             # ۱. پیدا کردن آخرین تاریخ
-            page_text = await page.evaluate("document.body.innerText")
             last_day_marker = "آخرین روز\n"
-            last_day_index = page_text.find(last_day_marker)
+            last_day_index = text.find(last_day_marker)
             if last_day_index == -1:
                 print("Could not find the last trading day.")
-                await browser.close()
                 return
-            last_date = page_text[last_day_index + len(last_day_marker):].split('\n')[0].strip()
+            last_date = text[last_day_index + len(last_day_marker):].split('\n')[0].strip()
             print(f"Last trading date: {last_date}")
 
-            # ۲. استخراج کارت‌های نقل و انتقالات
-            # ما دنبال کارت هایی میگردیم که متنشون شامل کلمه "مالکیت سهم" هست (چون توی همه کارت ها هست)
-            cards = await page.locator("div:has-text('مالکیت سهم')").all()
+            # ۲. پیدا کردن بخش لیست انتقالات
+            start_marker = "تازه‌ترین نقل و انتقالات"
+            end_marker = "منبع: گزارش روزانه"
             
-            records = []
-            for card in cards:
-                text = await card.inner_text()
-                # اگر تاریخ آخرین روز توی این کارت بود، یعنی مربوط به امروزه
-                if last_date in text and "تومان" in text and "میلیون" in text:
-                    # پاکسازی متن کارت برای نمایش بهتر
-                    clean_text = text.replace('\n', ' | ').strip()
-                    # حذف کاراکترهای اضافی
-                    records.append(clean_text)
+            start_index = text.find(start_marker)
+            end_index = text.find(end_marker)
+            
+            if start_index != -1 and end_index != -1:
+                # جدا کردن بخش انتقالات
+                transfers_text = text[start_index:end_index].strip()
+                
+                # ۳. پاکسازی متن اولیه
+                lines = transfers_text.split('\n')
+                # حذف خطوط اول که شامل تیتر و دکمه هاست
+                clean_lines = [line.strip() for line in lines if line.strip() not in ["تازه‌ترین نقل و انتقالات", "همه", "خرید", "فروش"]]
+                
+                # ۴. گروه‌بندی خطوط به صورت بلوک‌های متنی
+                # چون هر کارت شامل چند خط هست، ما خطوط رو بررسی میکنیم
+                # هر کارت معمولاً شامل نام و تاریخ هست که ما دنبال تاریخ میگردیم
+                records = []
+                current_record = []
+                
+                for line in clean_lines:
+                    # اگر خط شامل تاریخ آخرین روز بود، یعنی یه رکورد جدید شروع شده
+                    if last_date in line:
+                        current_record.append(line)
+                    elif current_record:
+                        current_record.append(line)
+                        # اگر به خطی رسیدیم که مربوط به رکورد بعدی نیست (مثل شروع کارت بعدی)
+                        # و رکورد فعلی کامل شده، اون رو ذخیره میکنیم
+                        # چون نمیدونیم دقیقا کجا تموم میشه، هر بار که یه تاریخ جدید دیدیم اون رو ذخیره میکنیم
+                        if len(current_record) >= 4: # تعداد خطوط تقریبی هر کارت
+                             records.append(" | ".join(current_record))
+                             current_record = []
 
-            # ۳. ساخت پیام و ارسال
-            if records:
-                # برای جلوگیری از تکراری بودن کارت های والد، از set استفاده می‌کنیم
+                # اگر آخرین رکورد جا مونده بود
+                if current_record and len(current_record) > 0:
+                    records.append(" | ".join(current_record))
+
+                # حذف رکوردهای تکراری
                 unique_records = list(dict.fromkeys(records))
-                
-                formatted_list = "\n➖➖➖➖➖➖➖➖\n".join(unique_records)
-                message = f"<b>📊 نقل و انتقالات فاندبیس ({last_date})</b>\n\n{formatted_list}"
-                
-                # تقسیم پیام طولانی
-                max_length = 4000
-                if len(message) > max_length:
-                    parts = [message[i:i+max_length] for i in range(0, len(message), max_length)]
-                    for part in parts:
-                        send_to_telegram(part)
+
+                if unique_records:
+                    formatted_list = "\n➖➖➖➖➖➖➖➖\n".join(unique_records)
+                    message = f"<b>📊 نقل و انتقالات فاندبیس ({last_date})</b>\n\n{formatted_list}"
+                    
+                    max_length = 4000
+                    if len(message) > max_length:
+                        parts = [message[i:i+max_length] for i in range(0, len(message), max_length)]
+                        for part in parts:
+                            send_to_telegram(part)
+                    else:
+                        send_to_telegram(message)
                 else:
-                    send_to_telegram(message)
+                    print("No transfers found for the last date.")
             else:
-                print("No transfers found for the last date.")
+                print("Could not find the specific markers in the page text.")
                 
         except Exception as e:
-            print("Error:", e)
-        finally:
-            await browser.close()
+            print("Error parsing text:", e)
 
 if __name__ == "__main__":
     asyncio.run(main())
