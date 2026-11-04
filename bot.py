@@ -67,6 +67,26 @@ def split_message(text, limit=MESSAGE_LIMIT):
     return chunks
 
 
+def format_value_cell(value):
+    # فقط متن مربوط به ارزش معامله را نگه می‌داریم و برچسب خرید/فروش را حذف می‌کنیم.
+    lines = [
+        clean_text(line)
+        for line in (value or "").splitlines()
+        if clean_text(line) and clean_text(line) not in ("خرید", "فروش")
+    ]
+    value_text = "\n".join(lines).strip()
+    if not value_text:
+        raise RuntimeError("مقدار ارزش خرید/فروش در یکی از ردیف‌ها خالی است.")
+
+    if "میلیارد تومان" in value_text:
+        if "ارزش خرید" not in value_text and "ارزش فروش" not in value_text and "ارزش خرید / فروش" not in value_text:
+            return "ارزش خرید / فروش\n" + value_text
+        return value_text
+
+    # در صورتی که سلول فقط عدد را داشته باشد.
+    return f"ارزش خرید / فروش\nمیلیارد تومان: {value_text}"
+
+
 async def extract_trades():
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
@@ -113,13 +133,10 @@ async def extract_trades():
                 if row_count < 2:
                     continue
 
-                header_cells = await rows.first.locator("th, td").all_inner_texts()
-                headers = [clean_text(cell) for cell in header_cells]
-
                 for row_index in range(1, row_count):
                     cells = await rows.nth(row_index).locator("th, td").all_inner_texts()
                     values = [clean_text(cell) for cell in cells]
-                    if len(values) < 2:
+                    if len(values) < 3:
                         continue
 
                     row_text = " | ".join(values)
@@ -129,18 +146,17 @@ async def extract_trades():
                         continue
 
                     trade_type = "buy" if is_buy else "sell"
-                    key = (trade_type, tuple(values))
+                    key = (trade_type, tuple(values[:3]))
                     if key in seen:
                         continue
                     seen.add(key)
 
-                    details = []
-                    for index, value in enumerate(values):
-                        if not value:
-                            continue
-                        label = headers[index] if index < len(headers) and headers[index] else f"ستون {index + 1}"
-                        details.append(f"{label}: {value}")
-                    trades[trade_type].append("\n".join(details))
+                    fund_name = values[0]
+                    symbol = values[1]
+                    value_text = format_value_cell(await rows.nth(row_index).locator("th, td").nth(2).inner_text())
+
+                    record = f"{fund_name}\n{symbol}\n{value_text}"
+                    trades[trade_type].append(record)
 
             total = len(trades["buy"]) + len(trades["sell"])
             if total == 0:
