@@ -1,117 +1,185 @@
 import asyncio
+import logging
 import os
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import requests
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
 URL = "https://app.fundbase.ir/"
+SECTION_TITLE = "صندوق‌ها امروز چه سهم‌هایی خریدند و چه فروختند؟"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
+MESSAGE_LIMIT = 3500
 
-def send_to_telegram(text):
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
+
+
+def clean_text(value):
+    return re.sub(r"\\s+", " ", value or "").strip()
+
+
+def send_to_telegram(message):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("Error: Telegram credentials are not set in Secrets.")
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text}
-    response = requests.post(url, json=payload)
-    if response.status_code == 200:
-        print("Message sent to Telegram successfully!")
-    else:
-        print("Failed to send message:", response.text)
+        raise RuntimeError("TELEGRAM_TOKEN یا CHAT_ID در GitHub Secrets تنظیم نشده است.")
 
-def clean_text(text):
-    return re.sub(r'\s+', ' ', text).strip()
+    endpoint = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    response = requests.post(
+        endpoint,
+        json={"chat_id": CHAT_ID, "text": message, "disable_web_page_preview": True},
+        timeout=30,
+    )
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
 
-def parse_two_numbers(text):
-    """اگر متن شامل دو عدد بود، آن‌ها را با برچسب قبل و بعد جدا میکند"""
-    parts = text.split()
-    if len(parts) >= 2:
-        # اگر علامتهایی مثل — یا · وجود داشت، فقط اعداد معتبر را در نظر بگیر
-        valid_parts = [p for p in parts if any(char.isdigit() for char in p)]
-        if len(valid_parts) >= 2:
-            return f"قبل: {valid_parts[0]} | بعد: {valid_parts[1]}"
-    return text
+    if not response.ok or not payload.get("ok"):
+        description = payload.get("description", response.text[:500])
+        raise RuntimeError(f"ارسال پیام تلگرام ناموفق بود: {description}")
 
-async def main():
-    print("Starting Playwright...")
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
-        
-        print(f"Going to {URL}")
-        await page.goto(URL, wait_until="networkidle", timeout=60000)
-        await page.wait_for_timeout(3000)
 
+def split_message(text, limit=MESSAGE_LIMIT):
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    current = ""
+    for paragraph in text.split("\n"):
+        candidate = paragraph if not current else current + "\n" + paragraph
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        while len(paragraph) > limit:
+            chunks.append(paragraph[:limit])
+            paragraph = paragraph[limit:]
+        current = paragraph
+
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def extract_trades():
+    async with async_playwright() as playwright:
+        browser = await playwright.chromium.launch(headless=True)
+        page = await browser.new_page(locale="fa-IR")
         try:
-            print("Looking for the funds trade section...")
-            target_card = page.locator("text=صندوق‌ها امروز چه سهم‌هایی خریدند و چه فروختند؟").first
-            
-            if await target_card.count() > 0:
-                print("Found the card. Clicking...")
-                await target_card.click()
-                await page.wait_for_timeout(5000) 
-                
-                table = page.locator("table").first
-                if await table.count() == 0:
-                    print("Table not found!")
-                    await browser.close()
-                    return
+            logger.info("Opening %s", URL)
+            await page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+            try:
+                await page.wait_for_load_state("networkidle", timeout=15000)
+            except PlaywrightTimeoutError:
+                logger.info("Page did not become network-idle; continuing.")
 
-                rows = await table.locator("tr").all()
-                print(f"Found {len(rows)} rows in table.")
+            section = page.get_by_text(SECTION_TITLE, exact=True).first
+            if await section.count() == 0:
+                raise RuntimeError("بخش معاملات صندوق‌ها در صفحه پیدا نشد.")
 
-                buys = []
-                sells = []
+            await section.scroll_into_view_if_needed()
+            try:
+                await section.click(timeout=15000)
+                logger.info("Clicked the fund trades section.")
+            except PlaywrightTimeoutError:
+                logger.info("Section click timed out; checking whether its table is already visible.")
 
-                for row in rows[1:]:
-                    cols = await row.locator("td").all()
-                    if len(cols) < 6:
+            try:
+                await page.wait_for_function(
+                    "() => Array.from(document.querySelectorAll('table')).some(t => t.querySelectorAll('tr').length > 1)",
+                    timeout=20000,
+                )
+            except PlaywrightTimeoutError:
+                pass
+
+            tables = page.locator("table")
+            table_count = await tables.count()
+            if table_count == 0:
+                raise RuntimeError("بخش پیدا شد، اما هیچ جدول معاملاتی بارگذاری نشد.")
+
+            trades = {"buy": [], "sell": []}
+            seen = set()
+
+            for table_index in range(table_count):
+                table = tables.nth(table_index)
+                rows = table.locator("tr")
+                row_count = await rows.count()
+                if row_count < 2:
+                    continue
+
+                header_cells = await rows.first.locator("th, td").all_inner_texts()
+                headers = [clean_text(cell) for cell in header_cells]
+
+                for row_index in range(1, row_count):
+                    cells = await rows.nth(row_index).locator("th, td").all_inner_texts()
+                    values = [clean_text(cell) for cell in cells]
+                    if len(values) < 2:
                         continue
-                    
-                    fund_name = clean_text(await cols[0].inner_text())
-                    symbol = clean_text(await cols[1].inner_text())
-                    value_col_text = clean_text(await cols[2].inner_text())
-                    
-                    asset_raw = clean_text(await cols[3].inner_text())
-                    weight_raw = clean_text(await cols[4].inner_text())
-                    weight_30d_raw = clean_text(await cols[5].inner_text())
 
-                    # پردازش اعداد با تابع جدید
-                    asset_text = parse_two_numbers(asset_raw)
-                    weight_text = parse_two_numbers(weight_raw)
-                    weight_30d_text = parse_two_numbers(weight_30d_raw)
+                    row_text = " | ".join(values)
+                    is_buy = "خرید" in row_text
+                    is_sell = "فروش" in row_text
+                    if is_buy == is_sell:
+                        continue
 
-                    formatted_record = (
-                        f"🏢 {fund_name} | نماد: {symbol}\n"
-                        f"💰 ارزش: {value_col_text}\n"
-                        f"📊 دارایی: {asset_text} (میلیارد تومان)\n"
-                        f"⚖️ وزن سبد: {weight_text}\n"
-                        f"📅 وزن ۳۰ روزه: {weight_30d_text}"
-                    )
+                    trade_type = "buy" if is_buy else "sell"
+                    key = (trade_type, tuple(values))
+                    if key in seen:
+                        continue
+                    seen.add(key)
 
-                    if "خرید" in value_col_text:
-                        buys.append(formatted_record)
-                    elif "فروش" in value_col_text:
-                        sells.append(formatted_record)
+                    details = []
+                    for index, value in enumerate(values):
+                        if not value:
+                            continue
+                        label = headers[index] if index < len(headers) and headers[index] else f"ستون {index + 1}"
+                        details.append(f"{label}: {value}")
+                    trades[trade_type].append("\n".join(details))
 
-                # ارسال به تلگرام
-                if buys:
-                    buy_msg = "🟢 خریدهای صندوق‌ها\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(buys)
-                    send_to_telegram(buy_msg)
-                    await asyncio.sleep(2)
-                
-                if sells:
-                    sell_msg = "🔴 فروش‌های صندوق‌ها\n\n" + "\n➖➖➖➖➖➖➖➖\n".join(sells)
-                    send_to_telegram(sell_msg)
+            total = len(trades["buy"]) + len(trades["sell"])
+            if total == 0:
+                raise RuntimeError(
+                    "جدول بارگذاری شد، اما هیچ ردیفی با نوع معامله «خرید» یا «فروش» پیدا نشد؛ "
+                    "برای جلوگیری از ارسال گزارش اشتباه، اجرای ربات متوقف شد."
+                )
 
-            else:
-                print("Could not find the target section on the page.")
-
-        except Exception as e:
-            print("Error:", e)
+            logger.info(
+                "Extracted %s trade rows (%s buys, %s sells).",
+                total, len(trades["buy"]), len(trades["sell"])
+            )
+            return trades
         finally:
             await browser.close()
+
+
+async def main():
+    trades = await extract_trades()
+    now = datetime.now(TEHRAN_TZ).strftime("%Y/%m/%d - %H:%M")
+    messages = []
+
+    for trade_type, title, emoji in (
+        ("buy", "خریدهای صندوق‌ها", "🟢"),
+        ("sell", "فروش‌های صندوق‌ها", "🔴"),
+    ):
+        records = trades[trade_type]
+        if records:
+            body = f"{emoji} {title}\n🕒 زمان بررسی: {now} (تهران)\n\n"
+            body += "\n\n━━━━━━━━━━━━━━\n\n".join(records)
+            messages.extend(split_message(body))
+
+    if not messages:
+        raise RuntimeError("گزارشی برای ارسال ساخته نشد.")
+
+    for index, message in enumerate(messages, start=1):
+        send_to_telegram(message)
+        logger.info("Telegram message %s/%s sent.", index, len(messages))
+
 
 if __name__ == "__main__":
     asyncio.run(main())
