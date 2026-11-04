@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 def clean_text(value):
-    return re.sub(r"\\s+", " ", value or "").strip()
+    return re.sub(r"\s+", " ", value or "").strip()
 
 
 def send_to_telegram(message):
