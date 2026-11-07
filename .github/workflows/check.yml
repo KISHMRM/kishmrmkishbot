@@ -3,10 +3,12 @@ name: Fundbase Bot
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions uses UTC: 19:30 UTC = 23:00 Tehran
+    # 19:30 UTC = 23:00 Tehran
     - cron: "30 19 * * *"
+      timezone: "Etc/UTC"
     # 00:30 UTC = 04:00 Tehran
     - cron: "30 0 * * *"
+      timezone: "Etc/UTC"
 
 concurrency:
   group: fundbase-bot
@@ -34,6 +36,13 @@ jobs:
 
       - name: Install Playwright Chromium
         run: python -m playwright install --with-deps chromium
+
+      - name: Log schedule timing
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Scheduled cron: ${{ github.event.schedule }}"
+          date -u '+UTC: %Y-%m-%d %H:%M:%S'
+          TZ=Asia/Tehran date '+Tehran: %Y-%m-%d %H:%M:%S'
 
       - name: Run bot
         env:
